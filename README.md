@@ -1,5 +1,10 @@
 # llama.cpp
 
+> [!IMPORTANT]
+> **Personal fork** of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) by [@aziis98](https://github.com/aziis98).
+> Contains LLM-assisted patches for selected models and Intel + SYCL support and other experimental work.
+> This is not an official build — use upstream [llama.cpp](https://github.com/ggml-org/llama.cpp) for releases and support.
+
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
 <div align="center">
