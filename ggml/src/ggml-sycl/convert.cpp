@@ -326,6 +326,51 @@ static void dequantize_row_q6_K_sycl_reorder(const void * vx, dst_t * y, const i
 }
 
 template <typename dst_t>
+static void dequantize_row_tq1_0_sycl(const void *vx, dst_t *y, const int64_t k,
+                                 dpct::queue_ptr stream) {
+    const int64_t nb = k / QK_K;
+    const sycl::range<3> block_nums(1, 1, nb);
+    const sycl::range<3> block_dims(1, 1, QK_K / 2);
+    stream->submit([&](sycl::handler &cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<3>(block_nums * block_dims, block_dims),
+            [=](sycl::nd_item<3> item_ct1)
+                [[sycl::reqd_sub_group_size(WARP_SIZE)]] {
+                    const int i = item_ct1.get_global_id(2);
+                    if (i >= k / 2) return;
+                    const int64_t ib = i / (QK_K / 2);
+                    const int64_t iqs = i % (QK_K / 2);
+                    dfloat2 v;
+                    dequantize_tq1_0(vx, ib, iqs * 2, v);
+                    y[ib * QK_K + iqs * 2 + 0] = v.x();
+                    y[ib * QK_K + iqs * 2 + 1] = v.y();
+                });
+    });
+}
+
+template <typename dst_t>
+static void dequantize_row_tq2_0_sycl(const void *vx, dst_t *y, const int64_t k,
+                                 dpct::queue_ptr stream) {
+    const int64_t nb = k / QK_K;
+    const sycl::range<3> block_nums(1, 1, nb);
+    const sycl::range<3> block_dims(1, 1, QK_K / 2);
+    stream->submit([&](sycl::handler &cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<3>(block_nums * block_dims, block_dims),
+            [=](sycl::nd_item<3> item_ct1)
+                [[sycl::reqd_sub_group_size(WARP_SIZE)]] {
+                    const int i = item_ct1.get_global_id(2);
+                    if (i >= k / 2) return;
+                    const int64_t ib = i / (QK_K / 2);
+                    const int64_t iqs = i % (QK_K / 2);
+                    dfloat2 v;
+                    dequantize_tq2_0(vx, ib, iqs * 2, v);
+                    y[ib * QK_K + iqs * 2 + 0] = v.x();
+                    y[ib * QK_K + iqs * 2 + 1] = v.y();
+                });
+    });
+}
+template <typename dst_t>
 static void dequantize_row_iq1_s_sycl(const void *vx, dst_t *y, const int64_t k,
                                         dpct::queue_ptr stream) {
     const int64_t nb = k / QK_K;
@@ -692,6 +737,10 @@ to_fp16_sycl_t ggml_get_to_fp16_sycl(ggml_type type, ggml_tensor * dst) {
             } else {
                 return dequantize_row_q6_K_sycl;
             }
+        case GGML_TYPE_TQ1_0:
+            return dequantize_row_tq1_0_sycl;
+        case GGML_TYPE_TQ2_0:
+            return dequantize_row_tq2_0_sycl;
         case GGML_TYPE_IQ1_S:
             return dequantize_row_iq1_s_sycl;
         case GGML_TYPE_IQ1_M:
@@ -779,6 +828,10 @@ to_fp32_sycl_t ggml_get_to_fp32_sycl(ggml_type type, ggml_tensor *dst) {
             } else {
                 return dequantize_row_q6_K_sycl;
             }
+        case GGML_TYPE_TQ1_0:
+            return dequantize_row_tq1_0_sycl;
+        case GGML_TYPE_TQ2_0:
+            return dequantize_row_tq2_0_sycl;
         case GGML_TYPE_IQ1_S:
             return dequantize_row_iq1_s_sycl;
         case GGML_TYPE_IQ1_M:

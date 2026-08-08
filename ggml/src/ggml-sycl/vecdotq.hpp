@@ -71,6 +71,14 @@ static __dpct_inline__ int get_int_from_uint8(
   return x32;
 }
 
+static __dpct_inline__ int get_int_from_uint8_unaligned(
+    const uint8_t* x8,
+    const int& i32) {
+    int res;
+    __builtin_memcpy(&res, x8 + sizeof(int) * i32, sizeof(int));
+    return res;
+}
+
 static __dpct_inline__ int get_int_from_int8_aligned(
     const int8_t* x8,
     const int& i32) {
@@ -895,6 +903,115 @@ static __dpct_inline__ float vec_dot_q8_1_q8_1_impl(const int *v, const int *u,
 
     // scale second part of sum by QI8_1/ vdr to compensate for multiple threads adding it
     return sumi*d8d8 + m8s8 / (QI8_1 / vdr);
+}
+
+#define VDR_TQ1_0_Q8_1_MMVQ 2
+static __dpct_inline__ float
+vec_dot_tq1_0_q8_1(const void *__restrict__ vbq,
+                   const block_q8_1 *__restrict__ bq8_1, const int &iqs) {
+    const block_tq1_0 * bq = (const block_tq1_0 *) vbq;
+    const uint8_t pow3[5] = {1, 3, 9, 27, 81};
+    float sumf = 0.0f;
+    
+#pragma unroll
+    for (int v = 0; v < VDR_TQ1_0_Q8_1_MMVQ; ++v) {
+        int curr_iqs = iqs + v;
+        const block_q8_1 * bq8_1_chunk = bq8_1 + curr_iqs;
+        int sumi = 0;
+
+        if (curr_iqs < 5) {
+            const int l = curr_iqs;
+#pragma unroll
+            for (int m = 0; m < 32; ++m) {
+                uint8_t q = bq->qs[m] * pow3[l];
+                uint16_t xi = ((uint16_t) q * 3) >> 8;
+                sumi += (xi - 1) * bq8_1_chunk->qs[m];
+            }
+        } else if (curr_iqs == 5) {
+#pragma unroll
+            for (int m = 0; m < 16; ++m) {
+                uint8_t q = bq->qs[32 + m] * pow3[0];
+                uint16_t xi = ((uint16_t) q * 3) >> 8;
+                sumi += (xi - 1) * bq8_1_chunk->qs[m];
+            }
+#pragma unroll
+            for (int m = 0; m < 16; ++m) {
+                uint8_t q = bq->qs[32 + m] * pow3[1];
+                uint16_t xi = ((uint16_t) q * 3) >> 8;
+                sumi += (xi - 1) * bq8_1_chunk->qs[16 + m];
+        }
+        } else if (curr_iqs == 6) {
+#pragma unroll
+            for (int m = 0; m < 16; ++m) {
+                uint8_t q = bq->qs[32 + m] * pow3[2];
+                uint16_t xi = ((uint16_t) q * 3) >> 8;
+                sumi += (xi - 1) * bq8_1_chunk->qs[m];
+            }
+#pragma unroll
+            for (int m = 0; m < 16; ++m) {
+                uint8_t q = bq->qs[32 + m] * pow3[3];
+                uint16_t xi = ((uint16_t) q * 3) >> 8;
+                sumi += (xi - 1) * bq8_1_chunk->qs[16 + m];
+            }
+        } else if (curr_iqs == 7) {
+#pragma unroll
+            for (int m = 0; m < 16; ++m) {
+                uint8_t q = bq->qs[32 + m] * pow3[4];
+                uint16_t xi = ((uint16_t) q * 3) >> 8;
+                sumi += (xi - 1) * bq8_1_chunk->qs[m];
+            }
+#pragma unroll
+            for(int l = 0; l < 4; ++l) {
+#pragma unroll
+                for(int j = 0; j < 4; ++j) {
+                    uint8_t q = bq->qh[j] * pow3[l];
+                    uint16_t xi = ((uint16_t) q * 3) >> 8;
+                    sumi += (xi - 1) * bq8_1_chunk->qs[16 + l*4 + j];
+                }
+            }
+        }
+
+        const float d = sycl::vec<sycl::half, 1>(bq->d).convert<float, sycl::rounding_mode::automatic>()[0];
+        const float d8 = bq8_1_chunk->ds[0];
+        sumf += sumi * d * d8;
+    }
+    return sumf;
+}
+
+#define VDR_TQ2_0_Q8_1_MMVQ 4
+static __dpct_inline__ float
+vec_dot_tq2_0_q8_1(const void *__restrict__ vbq,
+                   const block_q8_1 *__restrict__ bq8_1, const int &iqs) {
+    const block_tq2_0 * bq = (const block_tq2_0 *) vbq;
+    const float d = sycl::vec<sycl::half, 1>(bq->d).convert<float, sycl::rounding_mode::automatic>()[0];
+
+    float sumf = 0.0f;
+#pragma unroll
+    for (int v = 0; v < VDR_TQ2_0_Q8_1_MMVQ; ++v) {
+        int curr_iqs = iqs + v;
+        const int byte_base = 32 * (curr_iqs >> 2);
+        const int lane      = curr_iqs & 3;
+        const block_q8_1 * bq8_1_chunk = bq8_1 + curr_iqs;
+
+        int sumi = 0;
+        int suma = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            uint32_t w_pack = (uint32_t)get_int_from_uint8_unaligned(bq->qs + byte_base, j);
+            int a_pack = get_int_from_int8_aligned(bq8_1_chunk->qs, j);
+
+            int sym_pack = (w_pack >> (2 * lane)) & 0x03030303;
+
+            sumi = ggml_sycl_dp4a(sym_pack, a_pack, sumi);
+            suma = ggml_sycl_dp4a(0x01010101, a_pack, suma);
+        }
+
+        sumi -= suma;
+
+        const float d8 = bq8_1_chunk->ds[0];
+        sumf += sumi * (d * d8);
+    }
+    return sumf;
 }
 
 static __dpct_inline__ float

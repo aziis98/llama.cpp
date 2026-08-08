@@ -452,6 +452,58 @@ static __dpct_inline__ void dequantize_nvfp4(const void *vx, const int64_t ib,
     v.y() = dequantize_one(iqs + 1);
 }
 
+static __dpct_inline__ void dequantize_tq1_0(const void *vx, const int64_t ib,
+                                             const int iqs, dfloat2 &v) {
+    const block_tq1_0 * x = (const block_tq1_0 *) vx;
+    const float d = sycl::vec<sycl::half, 1>(x[ib].d).convert<float, sycl::rounding_mode::automatic>()[0];
+    const uint8_t pow3[5] = {1, 3, 9, 27, 81};
+    
+    auto get_val = [&](int idx) -> float {
+        if (idx < 160) {
+            int l = idx / 32;
+            int m = idx % 32;
+            uint8_t q = x[ib].qs[m] * pow3[l];
+            return (float)((((uint16_t) q * 3) >> 8) - 1) * d;
+        } else if (idx < 240) {
+            int idx2 = idx - 160;
+            int l = idx2 / 16;
+            int m = idx2 % 16;
+            uint8_t q = x[ib].qs[32 + m] * pow3[l];
+            return (float)((((uint16_t) q * 3) >> 8) - 1) * d;
+        } else {
+            int idx3 = idx - 240;
+            int l = idx3 / 4;
+            int j = idx3 % 4;
+            uint8_t q = x[ib].qh[j] * pow3[l];
+            return (float)((((uint16_t) q * 3) >> 8) - 1) * d;
+        }
+    };
+    
+    v.x() = get_val(iqs + 0);
+    v.y() = get_val(iqs + 1);
+}
+
+static __dpct_inline__ void dequantize_tq2_0(const void *vx, const int64_t ib,
+                                             const int iqs, dfloat2 &v) {
+    const block_tq2_0 * x = (const block_tq2_0 *) vx;
+
+    const float d = sycl::vec<sycl::half, 1>(x[ib].d).convert<float, sycl::rounding_mode::automatic>()[0];
+
+    const int e0 = iqs + 0;
+    const int e1 = iqs + 1;
+
+    const int b0 = 32 * (e0 >> 7) + (e0 & 31);
+    const int l0 = (e0 >> 5) & 3;
+    const int b1 = 32 * (e1 >> 7) + (e1 & 31);
+    const int l1 = (e1 >> 5) & 3;
+
+    const int c0 = (x[ib].qs[b0] >> (2 * l0)) & 0x3;
+    const int c1 = (x[ib].qs[b1] >> (2 * l1)) & 0x3;
+
+    v.x() = (c0 - 1) * d;
+    v.y() = (c1 - 1) * d;
+}
+
 static __dpct_inline__ void dequantize_iq2_xxs(const void *vx, const int64_t ib,
                                                const int iqs, dfloat2 &v) {
 #if QK_K == 256

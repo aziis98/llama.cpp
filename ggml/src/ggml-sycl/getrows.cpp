@@ -300,7 +300,15 @@ void ggml_sycl_op_get_rows(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
             get_rows_sycl<QK_K, 1, dequantize_iq3_xxs>(ctx, dst->src[0], dst->src[1], dst, (const float *)dst->src[0]->data,
             src1_i32, (float *)dst->data, ctx.stream());
             break;
-        case GGML_TYPE_IQ1_S:
+        case GGML_TYPE_TQ1_0:
+            get_rows_sycl<QK_K, 2, dequantize_tq1_0>(ctx, dst->src[0], dst->src[1], dst, (const float *)dst->src[0]->data,
+                src1_i32, (float *)dst->data, ctx.stream());
+            break;
+        case GGML_TYPE_TQ2_0:
+            get_rows_sycl<QK_K, 2, dequantize_tq2_0>(ctx, dst->src[0], dst->src[1], dst, (const float *)dst->src[0]->data,
+                src1_i32, (float *)dst->data, ctx.stream());
+            break;
+case GGML_TYPE_IQ1_S:
             get_rows_sycl<QK_K, 1, dequantize_iq1_s>(ctx, dst->src[0], dst->src[1], dst, (const float *)dst->src[0]->data,
             src1_i32, (float *)dst->data, ctx.stream());
             break;
