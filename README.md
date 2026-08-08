@@ -1,9 +1,9 @@
 # llama.cpp
 
-> [!IMPORTANT]
-> **Personal fork** of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) by [@aziis98](https://github.com/aziis98).
-> Contains LLM-assisted patches for selected models and Intel + SYCL support and other experimental work.
-> This is not an official build — use upstream [llama.cpp](https://github.com/ggml-org/llama.cpp) for releases and support.
+> [!NOTE]
+> **Personal fork** of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) by [@aziis98](https://github.com/aziis98) — not an official build; patches are LLM-assisted. Use upstream [llama.cpp](https://github.com/ggml-org/llama.cpp) for releases and support.
+> New in this fork:
+> - **TQ1_0/TQ2_0 on SYCL** — ternary quant types supported on the Intel SYCL backend (dequant, get_rows, mmvq mat-vec). The TQ types were first created by [prism](https://github.com/PrismML-Eng/llama.cpp); [stamsam](https://github.com/stamsam/llama.cpp) added maple support; SYCL support by @aziis98, developed with Antigravity CLI and Gemini 3.1 Pro.
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
