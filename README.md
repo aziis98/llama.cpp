@@ -4,6 +4,14 @@
 > **Personal fork** of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) by [@aziis98](https://github.com/aziis98) — not an official build; patches are LLM-assisted. Use upstream [llama.cpp](https://github.com/ggml-org/llama.cpp) for releases and support.
 > New in this fork:
 > - **TQ1_0/TQ2_0 on SYCL** — ternary quant types supported on the Intel SYCL backend (dequant, get_rows, mmvq mat-vec). The TQ types were first created by [prism](https://github.com/PrismML-Eng/llama.cpp); [stamsam](https://github.com/stamsam/llama.cpp) added maple support; SYCL support by @aziis98, developed with Antigravity CLI and Gemini 3.1 Pro.
+>
+> ### Build (SYCL)
+> Configures and builds `llama-cli` for the Intel Arc iGPU: oneAPI SYCL backend, fp16 compute, LTO, oneMKL BLAS.
+> ```bash
+> source /opt/intel/oneapi/setvars.sh
+> cmake -B build-sycl -DGGML_SYCL=ON -DGGML_SYCL_F16=ON -DGGML_LTO=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Intel10_64lp -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
+> cmake --build build-sycl --config Release -j$(nproc) -t llama-cli
+> ```
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
