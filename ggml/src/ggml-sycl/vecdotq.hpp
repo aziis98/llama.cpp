@@ -906,72 +906,130 @@ static __dpct_inline__ float vec_dot_q8_1_q8_1_impl(const int *v, const int *u,
 }
 
 #define VDR_TQ1_0_Q8_1_MMVQ 2
+
+// 3^l for l = 0..4 (fits uint8_t)
+static constexpr uint8_t tq1_0_pow3[5] = {1, 3, 9, 27, 81};
+
+// Load 16 x-bytes; the unrolled byte loads fold into one 16-byte load.
+static __dpct_inline__ sycl::vec<uint8_t, 16> tq1_0_load_16(const uint8_t * p) {
+    sycl::vec<uint8_t, 16> v;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        v[i] = p[i];
+    }
+    return v;
+}
+
+// Exact trit decode for N bytes r, each equal to byte * 3^l (mod 256, u8
+// multiply wraps). The trit digit is xi = (3r) >> 8, exact for every r in
+// [0, 255]. Uses the "-1 cancel + halving add" chain from the x86 CPU kernel
+// (ggml-cpu/arch/x86/quants.c) re-expressed so no intermediate exceeds
+// uint8_t: a = max(r,1)-1; b = (a+1)>>1; c = (a+b+1)>>1; xi = c>>6. (The plain
+// ARM vhadd chain is inexact for some reachable inputs - do NOT use it here.)
+// val bytes come out as 0xFF/0x00/0x01 (= -1/0/1 as int8), packed 4 per int in
+// memory order, i.e. byte i of val[j] pairs with byte i of the
+// get_int_from_int8_aligned int from the q8_1 chunk.
+template <int N>
+static __dpct_inline__ void tq1_0_decode(const sycl::vec<uint8_t, N> & r,
+                                         int (&val)[N / 4]) {
+    const sycl::vec<uint8_t, N> one(1);
+    const sycl::vec<uint8_t, N> a  = sycl::max(r, one) - one; // max(r,1)-1
+    const sycl::vec<uint8_t, N> b  = (a + one) >> 1;          // (a+1)>>1, a+1 <= 255
+    const sycl::vec<uint8_t, N> c  = (a >> 1) + (b >> 1) +
+                                     (((a & one) + (b & one) + one) >> 1); // (a+b+1)>>1, <= 191
+    const sycl::vec<uint8_t, N> xi = c >> 6;                  // 0..2
+    const sycl::vec<uint8_t, N> v  = xi - one;                // wraps 0 -> 0xFF
+
+    const sycl::vec<uint32_t, N / 4> packed =
+        v.template as<sycl::vec<uint32_t, N / 4>>();
+#pragma unroll
+    for (int i = 0; i < N / 4; ++i) {
+        val[i] = (int) packed[i];
+    }
+}
+
+// 4 dp4a of one decoded 16-byte group against the q8_1 ints [off, off+4)
+static __dpct_inline__ int tq1_0_dot_16(const int (&val)[4], const block_q8_1 * bq8_1_chunk,
+                                        const int off, int sumi) {
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        sumi = ggml_sycl_dp4a(val[j], get_int_from_int8_aligned(bq8_1_chunk->qs, off + j), sumi);
+    }
+    return sumi;
+}
+
 static __dpct_inline__ float
 vec_dot_tq1_0_q8_1(const void *__restrict__ vbq,
                    const block_q8_1 *__restrict__ bq8_1, const int &iqs) {
     const block_tq1_0 * bq = (const block_tq1_0 *) vbq;
-    const uint8_t pow3[5] = {1, 3, 9, 27, 81};
+
+    // fp16 block scale, shared by all 8 chunks (was recomputed per v)
+    const float d = sycl::vec<sycl::half, 1>(bq->d).convert<float, sycl::rounding_mode::automatic>()[0];
+
+    // x-bytes: qs[0..32) serves chunks 0..4, qs[32..48) serves chunks 5..7
+    const sycl::vec<uint8_t, 16> x0 = tq1_0_load_16(bq->qs + 0);
+    const sycl::vec<uint8_t, 16> x1 = tq1_0_load_16(bq->qs + 16);
+    const sycl::vec<uint8_t, 16> x2 = tq1_0_load_16(bq->qs + 32);
+
     float sumf = 0.0f;
-    
 #pragma unroll
     for (int v = 0; v < VDR_TQ1_0_Q8_1_MMVQ; ++v) {
-        int curr_iqs = iqs + v;
+        // Chunk remap: thread owns chunks {iqs/2, iqs/2 + 4} instead of
+        // {iqs, iqs+1}. Chunks 0..7 stay covered exactly once per K-block, so
+        // the framework's subgroup reduction is unaffected, but v = 0 now takes
+        // the < 5 branch for every lane; only v = 1 diverges.
+        const int curr_iqs = (iqs >> 1) + 4 * v;
         const block_q8_1 * bq8_1_chunk = bq8_1 + curr_iqs;
         int sumi = 0;
 
         if (curr_iqs < 5) {
-            const int l = curr_iqs;
-#pragma unroll
-            for (int m = 0; m < 32; ++m) {
-                uint8_t q = bq->qs[m] * pow3[l];
-                uint16_t xi = ((uint16_t) q * 3) >> 8;
-                sumi += (xi - 1) * bq8_1_chunk->qs[m];
-            }
+            // 32 values: qs[0..32) * 3^l (l = curr_iqs) against y[0..32)
+            const uint8_t m = tq1_0_pow3[curr_iqs]; // l is runtime here
+            int val[4];
+            tq1_0_decode<16>(x0 * m, val);
+            sumi = tq1_0_dot_16(val, bq8_1_chunk, 0, sumi);
+            tq1_0_decode<16>(x1 * m, val);
+            sumi = tq1_0_dot_16(val, bq8_1_chunk, 4, sumi);
         } else if (curr_iqs == 5) {
-#pragma unroll
-            for (int m = 0; m < 16; ++m) {
-                uint8_t q = bq->qs[32 + m] * pow3[0];
-                uint16_t xi = ((uint16_t) q * 3) >> 8;
-                sumi += (xi - 1) * bq8_1_chunk->qs[m];
-            }
-#pragma unroll
-            for (int m = 0; m < 16; ++m) {
-                uint8_t q = bq->qs[32 + m] * pow3[1];
-                uint16_t xi = ((uint16_t) q * 3) >> 8;
-                sumi += (xi - 1) * bq8_1_chunk->qs[16 + m];
-        }
+            // qs[32..48) * 3^0 -> y[0..16); qs[32..48) * 3^1 -> y[16..32)
+            int val[4];
+            tq1_0_decode<16>(x2, val);
+            sumi = tq1_0_dot_16(val, bq8_1_chunk, 0, sumi);
+            tq1_0_decode<16>(x2 * (uint8_t) 3, val);
+            sumi = tq1_0_dot_16(val, bq8_1_chunk, 4, sumi);
         } else if (curr_iqs == 6) {
-#pragma unroll
-            for (int m = 0; m < 16; ++m) {
-                uint8_t q = bq->qs[32 + m] * pow3[2];
-                uint16_t xi = ((uint16_t) q * 3) >> 8;
-                sumi += (xi - 1) * bq8_1_chunk->qs[m];
-            }
-#pragma unroll
-            for (int m = 0; m < 16; ++m) {
-                uint8_t q = bq->qs[32 + m] * pow3[3];
-                uint16_t xi = ((uint16_t) q * 3) >> 8;
-                sumi += (xi - 1) * bq8_1_chunk->qs[16 + m];
-            }
-        } else if (curr_iqs == 7) {
-#pragma unroll
-            for (int m = 0; m < 16; ++m) {
-                uint8_t q = bq->qs[32 + m] * pow3[4];
-                uint16_t xi = ((uint16_t) q * 3) >> 8;
-                sumi += (xi - 1) * bq8_1_chunk->qs[m];
-            }
-#pragma unroll
-            for(int l = 0; l < 4; ++l) {
-#pragma unroll
-                for(int j = 0; j < 4; ++j) {
-                    uint8_t q = bq->qh[j] * pow3[l];
-                    uint16_t xi = ((uint16_t) q * 3) >> 8;
-                    sumi += (xi - 1) * bq8_1_chunk->qs[16 + l*4 + j];
-                }
-            }
+            // qs[32..48) * 3^2 -> y[0..16); qs[32..48) * 3^3 -> y[16..32)
+            int val[4];
+            tq1_0_decode<16>(x2 * (uint8_t) 9, val);
+            sumi = tq1_0_dot_16(val, bq8_1_chunk, 0, sumi);
+            tq1_0_decode<16>(x2 * (uint8_t) 27, val);
+            sumi = tq1_0_dot_16(val, bq8_1_chunk, 4, sumi);
+        } else { // curr_iqs == 7
+            // qs[32..48) * 3^4 -> y[0..16); qh (4 trits per byte) -> y[16..32)
+            int val[4];
+            tq1_0_decode<16>(x2 * (uint8_t) 81, val);
+            sumi = tq1_0_dot_16(val, bq8_1_chunk, 0, sumi);
+
+            // qh tail: load the 4 qh bytes as one u32, one dp4a per trit
+            // position l (3^l is a compile-time literal); byte j of the packed
+            // val pairs with y[16 + 4*l + j]
+            const uint32_t qh_u32 = (uint32_t) get_int_from_uint8_unaligned(bq->qh, 0);
+            sycl::vec<uint8_t, 4> qh4;
+            qh4[0] = (uint8_t)(qh_u32 & 0xFF);
+            qh4[1] = (uint8_t)((qh_u32 >> 8) & 0xFF);
+            qh4[2] = (uint8_t)((qh_u32 >> 16) & 0xFF);
+            qh4[3] = (uint8_t)((qh_u32 >> 24) & 0xFF);
+            int qval[1];
+            tq1_0_decode<4>(qh4, qval);
+            sumi = ggml_sycl_dp4a(qval[0], get_int_from_int8_aligned(bq8_1_chunk->qs, 4), sumi);
+            tq1_0_decode<4>(qh4 * (uint8_t) 3, qval);
+            sumi = ggml_sycl_dp4a(qval[0], get_int_from_int8_aligned(bq8_1_chunk->qs, 5), sumi);
+            tq1_0_decode<4>(qh4 * (uint8_t) 9, qval);
+            sumi = ggml_sycl_dp4a(qval[0], get_int_from_int8_aligned(bq8_1_chunk->qs, 6), sumi);
+            tq1_0_decode<4>(qh4 * (uint8_t) 27, qval);
+            sumi = ggml_sycl_dp4a(qval[0], get_int_from_int8_aligned(bq8_1_chunk->qs, 7), sumi);
         }
 
-        const float d = sycl::vec<sycl::half, 1>(bq->d).convert<float, sycl::rounding_mode::automatic>()[0];
         const float d8 = bq8_1_chunk->ds[0];
         sumf += sumi * d * d8;
     }
@@ -985,22 +1043,31 @@ vec_dot_tq2_0_q8_1(const void *__restrict__ vbq,
     const block_tq2_0 * bq = (const block_tq2_0 *) vbq;
     const float d = sycl::vec<sycl::half, 1>(bq->d).convert<float, sycl::rounding_mode::automatic>()[0];
 
+    // iqs is a multiple of 4 (the framework passes {0, 4}), so byte_base is the
+    // same for all 4 chunks this thread owns: load the 32 shared x-bytes once
+    // instead of once per chunk. The dp4a work and the sumi -= suma correction
+    // (ds.y is the fp16 sum of the original floats, not the int8 sum) are
+    // unchanged, so results stay bit-identical.
+    const int byte_base = 32 * (iqs >> 2);
+    uint32_t w_pack[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        w_pack[j] = (uint32_t) get_int_from_uint8_unaligned(bq->qs + byte_base, j);
+    }
+
     float sumf = 0.0f;
 #pragma unroll
     for (int v = 0; v < VDR_TQ2_0_Q8_1_MMVQ; ++v) {
-        int curr_iqs = iqs + v;
-        const int byte_base = 32 * (curr_iqs >> 2);
-        const int lane      = curr_iqs & 3;
+        const int curr_iqs = iqs + v;
+        const int lane     = curr_iqs & 3;
         const block_q8_1 * bq8_1_chunk = bq8_1 + curr_iqs;
 
         int sumi = 0;
         int suma = 0;
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
-            uint32_t w_pack = (uint32_t)get_int_from_uint8_unaligned(bq->qs + byte_base, j);
-            int a_pack = get_int_from_int8_aligned(bq8_1_chunk->qs, j);
-
-            int sym_pack = (w_pack >> (2 * lane)) & 0x03030303;
+            const int sym_pack = (int) ((w_pack[j] >> (2 * lane)) & 0x03030303);
+            const int a_pack   = get_int_from_int8_aligned(bq8_1_chunk->qs, j);
 
             sumi = ggml_sycl_dp4a(sym_pack, a_pack, sumi);
             suma = ggml_sycl_dp4a(0x01010101, a_pack, suma);
