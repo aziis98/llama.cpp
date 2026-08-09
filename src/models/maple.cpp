@@ -7,7 +7,13 @@ void llama_model_maple::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW,     hparams.n_swa);
     ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,  hparams.n_ff_exp);
 
-    ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, hparams.n_layer());
+    // stamsam-published GGUFs omit the per-layer pattern and encode the hybrid
+    // layout implicitly via rope.dimension_count / dimension_count_swa; fall back
+    // to the canonical 3:1 SWA:GA pattern (full attention at il %% 4 == 3) when
+    // the key is absent.
+    if (!ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, hparams.n_layer(), false)) {
+        hparams.set_swa_pattern(4, false);
+    }
 
     hparams.rope_freq_base_train_swa  = hparams.rope_freq_base_train;
     hparams.rope_freq_scale_train_swa = hparams.rope_freq_scale_train;
