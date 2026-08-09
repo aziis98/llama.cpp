@@ -86,8 +86,6 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_stablelm(params);
         case LLM_ARCH_MELLUM:
             return new llama_model_mellum(params);
-        case LLM_ARCH_MAPLE:
-            return new llama_model_maple(params);
         case LLM_ARCH_NANBEIGE:
             return new llama_model_nanbeige(params);
         case LLM_ARCH_QWEN:
