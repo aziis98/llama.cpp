@@ -374,6 +374,7 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_MELLUM:
         case LLM_ARCH_MAPLE:
         case LLM_ARCH_LAGUNA:
+        case LLM_ARCH_MAPLE:
             return true;
         default:
             return false;
